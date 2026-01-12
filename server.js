@@ -28,35 +28,78 @@ const server = http.createServer((req, res) => {
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
 
-// Store connected clients
-const clients = new Set();
+// Store sessions: { sessionId: Set of WebSocket clients }
+const sessions = new Map();
+
+// Generate a random session ID
+function generateSessionId() {
+  return Math.random().toString(36).substring(2, 9);
+}
+
+// Get session ID from URL query parameter
+function getSessionIdFromUrl(url) {
+  const urlObj = new URL(url, 'http://localhost');
+  return urlObj.searchParams.get('session') || 'default';
+}
 
 wss.on('connection', (ws, req) => {
-  console.log('Client connected');
-  clients.add(ws);
+  // Extract session ID from WebSocket upgrade request URL
+  const sessionId = getSessionIdFromUrl(req.url);
+  
+  console.log(`Client connected to session: ${sessionId}`);
+  
+  // Initialize session if it doesn't exist
+  if (!sessions.has(sessionId)) {
+    sessions.set(sessionId, new Set());
+    console.log(`Created new session: ${sessionId}`);
+  }
+  
+  // Add client to session
+  const sessionClients = sessions.get(sessionId);
+  sessionClients.add(ws);
+  
+  // Store session ID on the WebSocket for easy access
+  ws.sessionId = sessionId;
+  
+  // Send session info to client
+  ws.send(JSON.stringify({
+    type: 'session',
+    sessionId: sessionId,
+    clientCount: sessionClients.size
+  }));
 
-  // Forward drawing data to all other clients
+  // Forward drawing data to all other clients in the same session
   ws.on('message', (data) => {
-    // Convert Buffer to string if needed, then relay to all other clients
     const message = data.toString();
-    console.log('Received message:', message.substring(0, 50)); // Debug log
+    console.log(`Session ${sessionId} - Received message:`, message.substring(0, 50));
     
-    // Relay to all other clients immediately (no processing for minimal latency)
-    clients.forEach((client) => {
+    // Relay to all other clients in the same session
+    sessionClients.forEach((client) => {
       if (client !== ws && client.readyState === WebSocket.OPEN) {
-        client.send(message); // Send as string for WebSocket
+        client.send(message);
       }
     });
   });
 
   ws.on('close', () => {
-    console.log('Client disconnected');
-    clients.delete(ws);
+    console.log(`Client disconnected from session: ${sessionId}`);
+    sessionClients.delete(ws);
+    
+    // Clean up empty sessions
+    if (sessionClients.size === 0) {
+      sessions.delete(sessionId);
+      console.log(`Removed empty session: ${sessionId}`);
+    }
   });
 
   ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-    clients.delete(ws);
+    console.error(`WebSocket error in session ${sessionId}:`, error);
+    sessionClients.delete(ws);
+    
+    // Clean up empty sessions
+    if (sessionClients.size === 0) {
+      sessions.delete(sessionId);
+    }
   });
 });
 

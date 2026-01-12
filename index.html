@@ -125,6 +125,41 @@
             font-size: 12px;
             pointer-events: none;
         }
+
+        .session-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .session-id {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            cursor: pointer;
+            user-select: all;
+        }
+
+        .session-id:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .session-controls {
+            display: flex;
+            gap: 5px;
+        }
+
+        .session-btn {
+            padding: 4px 8px;
+            font-size: 11px;
+            background: #2196F3;
+        }
+
+        .session-btn:hover {
+            background: #1976D2;
+        }
     </style>
 </head>
 <body>
@@ -132,8 +167,17 @@
         <div class="status">
             <div class="status-indicator" id="statusIndicator"></div>
             <span id="statusText">Connecting...</span>
+            <div class="session-info" id="sessionInfo" style="display: none;">
+                <span>Session:</span>
+                <span class="session-id" id="sessionId">-</span>
+                <span id="clientCount">(0 users)</span>
+            </div>
         </div>
         <div class="controls">
+            <div class="session-controls">
+                <button class="session-btn" id="newSessionBtn">New Session</button>
+                <button class="session-btn" id="joinSessionBtn">Join Session</button>
+            </div>
             <input type="color" class="color-picker" id="colorPicker" value="#ffffff">
             <button class="clear-btn" id="clearBtn">Clear</button>
         </div>
@@ -152,10 +196,27 @@
         const clearBtn = document.getElementById('clearBtn');
         const statusIndicator = document.getElementById('statusIndicator');
         const statusText = document.getElementById('statusText');
+        const sessionInfo = document.getElementById('sessionInfo');
+        const sessionIdDisplay = document.getElementById('sessionId');
+        const clientCountDisplay = document.getElementById('clientCount');
+        const newSessionBtn = document.getElementById('newSessionBtn');
+        const joinSessionBtn = document.getElementById('joinSessionBtn');
 
-        // Get WebSocket URL (use current host)
+        // Get or create session ID from URL
+        function getSessionIdFromUrl() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('session') || 'default';
+        }
+
+        function setSessionIdInUrl(sessionId) {
+            const url = new URL(window.location);
+            url.searchParams.set('session', sessionId);
+            window.history.pushState({}, '', url);
+        }
+
+        // Get WebSocket URL with session parameter
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${window.location.host}`;
+        let currentSessionId = getSessionIdFromUrl();
         let ws = null;
         let isDrawing = false;
         let currentColor = '#ffffff';
@@ -177,6 +238,7 @@
 
         // Connect WebSocket
         function connect() {
+            const wsUrl = `${wsProtocol}//${window.location.host}?session=${currentSessionId}`;
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
@@ -188,6 +250,18 @@
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
+                    
+                    // Handle session info messages
+                    if (data.type === 'session') {
+                        currentSessionId = data.sessionId;
+                        sessionIdDisplay.textContent = currentSessionId;
+                        clientCountDisplay.textContent = `(${data.clientCount} user${data.clientCount !== 1 ? 's' : ''})`;
+                        sessionInfo.style.display = 'flex';
+                        setSessionIdInUrl(currentSessionId);
+                        return;
+                    }
+                    
+                    // Handle drawing data
                     handleRemoteDrawing(data);
                 } catch (e) {
                     console.error('Error parsing message:', e);
@@ -323,6 +397,46 @@
         clearBtn.addEventListener('click', () => {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             sendDrawing(['c']); // 'c' = clear
+        });
+
+        // New session button
+        newSessionBtn.addEventListener('click', () => {
+            // Generate a random session ID
+            const newSessionId = Math.random().toString(36).substring(2, 9);
+            currentSessionId = newSessionId;
+            setSessionIdInUrl(newSessionId);
+            
+            // Close current connection and reconnect with new session
+            if (ws) {
+                ws.close();
+            }
+            setTimeout(() => connect(), 100);
+        });
+
+        // Join session button
+        joinSessionBtn.addEventListener('click', () => {
+            const sessionId = prompt('Enter session ID to join:');
+            if (sessionId && sessionId.trim()) {
+                currentSessionId = sessionId.trim();
+                setSessionIdInUrl(currentSessionId);
+                
+                // Close current connection and reconnect with new session
+                if (ws) {
+                    ws.close();
+                }
+                setTimeout(() => connect(), 100);
+            }
+        });
+
+        // Copy session ID on click
+        sessionIdDisplay.addEventListener('click', () => {
+            navigator.clipboard.writeText(currentSessionId).then(() => {
+                const originalText = sessionIdDisplay.textContent;
+                sessionIdDisplay.textContent = 'Copied!';
+                setTimeout(() => {
+                    sessionIdDisplay.textContent = originalText;
+                }, 1000);
+            });
         });
 
         // Connect on load
