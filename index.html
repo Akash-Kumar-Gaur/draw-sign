@@ -323,7 +323,11 @@
         function handleRemoteDrawing(data) {
             console.log('Received drawing data:', data); // Debug
             if (data[0] === 'd') { // 'd' = draw
-                if (data[3]) { // start flag
+                if (data[3]) { // start flag - new stroke
+                    // End any existing path first
+                    if (remotePathActive) {
+                        ctx.stroke();
+                    }
                     // Start new path
                     ctx.beginPath();
                     ctx.strokeStyle = data[1];
@@ -333,25 +337,49 @@
                     lastRemoteY = data[5];
                     remotePathActive = true;
                 } else {
-                    // Continue existing path (or start one if needed)
+                    // Continue existing path
                     if (!remotePathActive) {
-                        // If we missed the start, begin a new path
+                        // If we missed the start, begin a new path at last known position
+                        // Use current coordinates if last position is invalid
+                        const startX = (lastRemoteX === 0 && lastRemoteY === 0) ? data[4] : lastRemoteX;
+                        const startY = (lastRemoteX === 0 && lastRemoteY === 0) ? data[5] : lastRemoteY;
+                        ctx.beginPath();
+                        ctx.strokeStyle = data[1];
+                        ctx.lineWidth = data[2];
+                        ctx.moveTo(startX, startY);
+                        lastRemoteX = startX;
+                        lastRemoteY = startY;
+                        remotePathActive = true;
+                    }
+                    // Update style if changed (but don't restart path)
+                    if (ctx.strokeStyle !== data[1] || ctx.lineWidth !== data[2]) {
+                        // If style changed mid-path, we need to stroke current path and start new one
+                        ctx.stroke();
                         ctx.beginPath();
                         ctx.strokeStyle = data[1];
                         ctx.lineWidth = data[2];
                         ctx.moveTo(lastRemoteX, lastRemoteY);
-                        remotePathActive = true;
                     }
-                    // Update style if changed
-                    if (ctx.strokeStyle !== data[1]) ctx.strokeStyle = data[1];
-                    if (ctx.lineWidth !== data[2]) ctx.lineWidth = data[2];
-                    // Draw line
-                    ctx.lineTo(data[4], data[5]);
+                    // Continue the line - add to path from last point
+                    // Validate coordinates are reasonable (within canvas bounds)
+                    const displayWidth = window.innerWidth;
+                    const displayHeight = window.innerHeight - 60;
+                    const x = Math.max(0, Math.min(data[4], displayWidth));
+                    const y = Math.max(0, Math.min(data[5], displayHeight));
+                    
+                    // Continue from last point to new point
+                    ctx.lineTo(x, y);
+                    // Stroke immediately for real-time feedback
                     ctx.stroke();
-                    lastRemoteX = data[4];
-                    lastRemoteY = data[5];
+                    lastRemoteX = x;
+                    lastRemoteY = y;
                 }
             } else if (data[0] === 'c') { // 'c' = clear
+                // End any active path before clearing
+                if (remotePathActive) {
+                    ctx.stroke();
+                    remotePathActive = false;
+                }
                 // Clear using CSS dimensions (context is already scaled)
                 const displayWidth = window.innerWidth;
                 const displayHeight = window.innerHeight - 60;
