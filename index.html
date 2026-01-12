@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Low-Latency Drawing Sync</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 10px 20px;
+            background: #2a2a2a;
+            border-bottom: 1px solid #3a3a3a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.connected {
+            background: #4caf50;
+        }
+
+        .status-indicator.connecting {
+            background: #ff9800;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            padding: 8px 16px;
+            background: #4caf50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        .clear-btn {
+            background: #f44336;
+        }
+
+        .clear-btn:hover {
+            background: #da190b;
+        }
+
+        .color-picker {
+            width: 40px;
+            height: 30px;
+            border: 2px solid #fff;
+            border-radius: 4px;
+            cursor: pointer;
+            background: #fff;
+        }
+
+        .canvas-container {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #canvas {
+            display: block;
+            cursor: crosshair;
+            touch-action: none;
+            width: 100%;
+            height: 100%;
+        }
+
+        .info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+        <div class="controls">
+            <input type="color" class="color-picker" id="colorPicker" value="#ffffff">
+            <button class="clear-btn" id="clearBtn">Clear</button>
+        </div>
+    </div>
+    <div class="canvas-container">
+        <canvas id="canvas"></canvas>
+        <div class="info">
+            Draw on one device, see it on another in real-time
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const colorPicker = document.getElementById('colorPicker');
+        const clearBtn = document.getElementById('clearBtn');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+
+        // Get WebSocket URL (use current host)
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}`;
+        let ws = null;
+        let isDrawing = false;
+        let currentColor = '#ffffff';
+        let lineWidth = 3;
+
+        // Set canvas size
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight - 60; // Account for header
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // Set drawing style
+        ctx.strokeStyle = currentColor;
+        ctx.lineWidth = lineWidth;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Connect WebSocket
+        function connect() {
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                statusIndicator.className = 'status-indicator connected';
+                statusText.textContent = 'Connected';
+                console.log('Connected to server');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleRemoteDrawing(data);
+                } catch (e) {
+                    console.error('Error parsing message:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                statusIndicator.className = 'status-indicator';
+                statusText.textContent = 'Disconnected - Reconnecting...';
+                setTimeout(connect, 1000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                statusIndicator.className = 'status-indicator connecting';
+                statusText.textContent = 'Connection error';
+            };
+        }
+
+        // Handle remote drawing data (optimized for speed)
+        let remotePathActive = false;
+        let lastRemoteX = 0;
+        let lastRemoteY = 0;
+        function handleRemoteDrawing(data) {
+            console.log('Received drawing data:', data); // Debug
+            if (data[0] === 'd') { // 'd' = draw
+                if (data[3]) { // start flag
+                    // Start new path
+                    ctx.beginPath();
+                    ctx.strokeStyle = data[1];
+                    ctx.lineWidth = data[2];
+                    ctx.moveTo(data[4], data[5]);
+                    lastRemoteX = data[4];
+                    lastRemoteY = data[5];
+                    remotePathActive = true;
+                } else {
+                    // Continue existing path (or start one if needed)
+                    if (!remotePathActive) {
+                        // If we missed the start, begin a new path
+                        ctx.beginPath();
+                        ctx.strokeStyle = data[1];
+                        ctx.lineWidth = data[2];
+                        ctx.moveTo(lastRemoteX, lastRemoteY);
+                        remotePathActive = true;
+                    }
+                    // Update style if changed
+                    if (ctx.strokeStyle !== data[1]) ctx.strokeStyle = data[1];
+                    if (ctx.lineWidth !== data[2]) ctx.lineWidth = data[2];
+                    // Draw line
+                    ctx.lineTo(data[4], data[5]);
+                    ctx.stroke();
+                    lastRemoteX = data[4];
+                    lastRemoteY = data[5];
+                }
+            } else if (data[0] === 'c') { // 'c' = clear
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                remotePathActive = false;
+            }
+        }
+
+        // Send drawing data (minimal payload for lowest latency)
+        function sendDrawing(data) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Use array format for smaller JSON payload
+                const jsonData = JSON.stringify(data);
+                console.log('Sending drawing data:', jsonData); // Debug
+                ws.send(jsonData);
+            } else {
+                console.warn('WebSocket not ready, state:', ws?.readyState);
+            }
+        }
+
+        // Drawing functions
+        function startDrawing(e) {
+            isDrawing = true;
+            const rect = canvas.getBoundingClientRect();
+            const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+            const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+            
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            
+            // Compact format: ['d', color, lineWidth, start, x, y]
+            sendDrawing(['d', currentColor, lineWidth, true, x, y]);
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            
+            const rect = canvas.getBoundingClientRect();
+            const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+            const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+            
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            
+            // Compact format: ['d', color, lineWidth, start, x, y]
+            sendDrawing(['d', currentColor, lineWidth, false, x, y]);
+        }
+
+        function stopDrawing() {
+            if (isDrawing) {
+                isDrawing = false;
+            }
+        }
+
+        // Mouse events
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mousemove', draw);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseleave', stopDrawing);
+
+        // Touch events
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startDrawing(e);
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            draw(e);
+        });
+        canvas.addEventListener('touchend', stopDrawing);
+        canvas.addEventListener('touchcancel', stopDrawing);
+
+        // Color picker
+        colorPicker.addEventListener('change', (e) => {
+            currentColor = e.target.value;
+            ctx.strokeStyle = currentColor;
+        });
+
+        // Clear button
+        clearBtn.addEventListener('click', () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            sendDrawing(['c']); // 'c' = clear
+        });
+
+        // Connect on load
+        connect();
+    </script>
+</body>
+</html>
