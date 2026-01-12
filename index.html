@@ -257,9 +257,27 @@
 
         // Track if we're intentionally switching sessions (don't auto-reconnect)
         let isSwitchingSession = false;
+        let isConnecting = false; // Prevent multiple simultaneous connections
         
         // Connect WebSocket
         function connect() {
+            // Prevent multiple simultaneous connections
+            if (isConnecting) {
+                console.log('Connection already in progress, skipping...');
+                return;
+            }
+            
+            // Close existing connection if any
+            if (ws) {
+                console.log('Closing existing connection before creating new one');
+                isSwitchingSession = true; // Prevent auto-reconnect
+                ws.onclose = null; // Remove auto-reconnect handler
+                ws.close();
+                ws = null;
+            }
+            
+            isConnecting = true;
+            
             // Reset remote drawing state when connecting to a new session
             resetRemoteDrawingState();
             
@@ -271,6 +289,7 @@
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
+                isConnecting = false; // Connection established
                 statusIndicator.className = 'status-indicator connected';
                 statusText.textContent = 'Connected';
                 console.log('Connected to server, session:', currentSessionId);
@@ -313,17 +332,26 @@
             };
 
             ws.onclose = () => {
+                isConnecting = false; // Connection closed, allow new connections
                 statusIndicator.className = 'status-indicator';
                 statusText.textContent = 'Disconnected - Reconnecting...';
                 // Only auto-reconnect if we're not intentionally switching sessions
-                if (!isSwitchingSession) {
-                    setTimeout(connect, 1000);
+                if (!isSwitchingSession && ws && ws.readyState === WebSocket.CLOSED) {
+                    // Clear the ws reference to allow new connection
+                    ws = null;
+                    setTimeout(() => {
+                        if (!isSwitchingSession) {
+                            connect();
+                        }
+                    }, 1000);
                 } else {
-                    console.log('Session switch in progress, not auto-reconnecting');
+                    console.log('Session switch in progress or connection already closed, not auto-reconnecting');
+                    ws = null; // Clear reference
                 }
             };
 
             ws.onerror = (error) => {
+                isConnecting = false; // Connection failed, allow retry
                 console.error('WebSocket error:', error);
                 statusIndicator.className = 'status-indicator connecting';
                 statusText.textContent = 'Connection error';
@@ -539,14 +567,20 @@
             // Set flag to prevent auto-reconnect to old session
             isSwitchingSession = true;
             
-            // Close current connection and reconnect with new session
+            // Close current connection properly
             if (ws) {
+                ws.onclose = null; // Remove auto-reconnect handler
+                ws.onerror = null; // Remove error handler
                 ws.close();
+                ws = null;
             }
+            
+            // Wait a bit for connection to close, then connect to new session
             setTimeout(() => {
                 isSwitchingSession = false; // Reset before connecting
+                isConnecting = false; // Reset connection flag
                 connect();
-            }, 100);
+            }, 200);
         });
 
         // Join session button
@@ -565,14 +599,20 @@
                 // Set flag to prevent auto-reconnect to old session
                 isSwitchingSession = true;
                 
-                // Close current connection and reconnect with new session
+                // Close current connection properly
                 if (ws) {
+                    ws.onclose = null; // Remove auto-reconnect handler
+                    ws.onerror = null; // Remove error handler
                     ws.close();
+                    ws = null;
                 }
+                
+                // Wait a bit for connection to close, then connect to new session
                 setTimeout(() => {
                     isSwitchingSession = false; // Reset before connecting
+                    isConnecting = false; // Reset connection flag
                     connect();
-                }, 100);
+                }, 200);
             }
         });
 

@@ -129,17 +129,22 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     console.log(`Client disconnected from session: ${sessionId}`);
-    sessionClients.delete(ws);
+    const wasRemoved = sessionClients.delete(ws);
     
-    // Broadcast updated session info to remaining clients
-    if (sessionClients.size > 0) {
-      broadcastSessionUpdate(sessionClients, sessionId);
-    }
-    
-    // Clean up empty sessions
-    if (sessionClients.size === 0) {
-      sessions.delete(sessionId);
-      console.log(`Removed empty session: ${sessionId}`);
+    if (wasRemoved) {
+      // Clean up any other closed connections
+      cleanupClosedConnections(sessionClients);
+      
+      // Broadcast updated session info to remaining clients
+      if (sessionClients.size > 0) {
+        broadcastSessionUpdate(sessionClients, sessionId);
+      }
+      
+      // Clean up empty sessions
+      if (sessionClients.size === 0) {
+        sessions.delete(sessionId);
+        console.log(`Removed empty session: ${sessionId}`);
+      }
     }
   });
 
