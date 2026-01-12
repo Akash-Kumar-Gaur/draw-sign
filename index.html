@@ -222,10 +222,29 @@
         let currentColor = '#ffffff';
         let lineWidth = 3;
 
-        // Set canvas size
+        // Set canvas size with proper device pixel ratio handling
         function resizeCanvas() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight - 60; // Account for header
+            const dpr = window.devicePixelRatio || 1;
+            const displayWidth = window.innerWidth;
+            const displayHeight = window.innerHeight - 60; // Account for header
+            
+            // Set CSS size
+            canvas.style.width = displayWidth + 'px';
+            canvas.style.height = displayHeight + 'px';
+            
+            // Set actual canvas size accounting for device pixel ratio
+            canvas.width = displayWidth * dpr;
+            canvas.height = displayHeight * dpr;
+            
+            // Reset transform and scale the context to match device pixel ratio
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+            ctx.scale(dpr, dpr);
+            
+            // Re-apply drawing style after resize
+            ctx.strokeStyle = currentColor;
+            ctx.lineWidth = lineWidth;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
         }
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
@@ -238,6 +257,12 @@
 
         // Connect WebSocket
         function connect() {
+            // Reset remote drawing state when connecting to a new session
+            resetRemoteDrawingState();
+            
+            // Ensure canvas is properly initialized (important for non-default sessions)
+            resizeCanvas();
+            
             const wsUrl = `${wsProtocol}//${window.location.host}?session=${currentSessionId}`;
             ws = new WebSocket(wsUrl);
             
@@ -258,6 +283,8 @@
                         clientCountDisplay.textContent = `(${data.clientCount} user${data.clientCount !== 1 ? 's' : ''})`;
                         sessionInfo.style.display = 'flex';
                         setSessionIdInUrl(currentSessionId);
+                        // Reset remote drawing state when session info is received
+                        resetRemoteDrawingState();
                         return;
                     }
                     
@@ -285,6 +312,14 @@
         let remotePathActive = false;
         let lastRemoteX = 0;
         let lastRemoteY = 0;
+        
+        // Reset remote drawing state (call when switching sessions)
+        function resetRemoteDrawingState() {
+            remotePathActive = false;
+            lastRemoteX = 0;
+            lastRemoteY = 0;
+        }
+        
         function handleRemoteDrawing(data) {
             console.log('Received drawing data:', data); // Debug
             if (data[0] === 'd') { // 'd' = draw
@@ -317,8 +352,11 @@
                     lastRemoteY = data[5];
                 }
             } else if (data[0] === 'c') { // 'c' = clear
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                remotePathActive = false;
+                // Clear using CSS dimensions (context is already scaled)
+                const displayWidth = window.innerWidth;
+                const displayHeight = window.innerHeight - 60;
+                ctx.clearRect(0, 0, displayWidth, displayHeight);
+                resetRemoteDrawingState();
             }
         }
 
@@ -395,7 +433,10 @@
 
         // Clear button
         clearBtn.addEventListener('click', () => {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Clear using CSS dimensions (context is already scaled)
+            const displayWidth = window.innerWidth;
+            const displayHeight = window.innerHeight - 60;
+            ctx.clearRect(0, 0, displayWidth, displayHeight);
             sendDrawing(['c']); // 'c' = clear
         });
 
@@ -405,6 +446,10 @@
             const newSessionId = Math.random().toString(36).substring(2, 9);
             currentSessionId = newSessionId;
             setSessionIdInUrl(newSessionId);
+            
+            // Reset local drawing state
+            isDrawing = false;
+            resetRemoteDrawingState();
             
             // Close current connection and reconnect with new session
             if (ws) {
@@ -419,6 +464,10 @@
             if (sessionId && sessionId.trim()) {
                 currentSessionId = sessionId.trim();
                 setSessionIdInUrl(currentSessionId);
+                
+                // Reset local drawing state
+                isDrawing = false;
+                resetRemoteDrawingState();
                 
                 // Close current connection and reconnect with new session
                 if (ws) {
