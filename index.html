@@ -185,7 +185,7 @@
     <div class="canvas-container">
         <canvas id="canvas"></canvas>
         <div class="info">
-            Draw on one device, see it on another in real-time
+            <!-- Draw on one device, see it on another in real-time -->
         </div>
     </div>
 
@@ -255,6 +255,9 @@
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
+        // Track if we're intentionally switching sessions (don't auto-reconnect)
+        let isSwitchingSession = false;
+        
         // Connect WebSocket
         function connect() {
             // Reset remote drawing state when connecting to a new session
@@ -264,12 +267,14 @@
             resizeCanvas();
             
             const wsUrl = `${wsProtocol}//${window.location.host}?session=${currentSessionId}`;
+            console.log('Connecting to session:', currentSessionId);
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
                 statusIndicator.className = 'status-indicator connected';
                 statusText.textContent = 'Connected';
-                console.log('Connected to server');
+                console.log('Connected to server, session:', currentSessionId);
+                isSwitchingSession = false; // Reset flag after successful connection
             };
 
             ws.onmessage = (event) => {
@@ -278,11 +283,23 @@
                     
                     // Handle session info messages
                     if (data.type === 'session') {
-                        currentSessionId = data.sessionId;
-                        sessionIdDisplay.textContent = currentSessionId;
-                        clientCountDisplay.textContent = `(${data.clientCount} user${data.clientCount !== 1 ? 's' : ''})`;
-                        sessionInfo.style.display = 'flex';
-                        setSessionIdInUrl(currentSessionId);
+                        // Only update if the session ID matches what we requested
+                        // This prevents overwriting when switching sessions
+                        if (data.sessionId === currentSessionId) {
+                            sessionIdDisplay.textContent = currentSessionId;
+                            clientCountDisplay.textContent = `(${data.clientCount} user${data.clientCount !== 1 ? 's' : ''})`;
+                            sessionInfo.style.display = 'flex';
+                            setSessionIdInUrl(currentSessionId);
+                            console.log('Session confirmed:', currentSessionId, 'with', data.clientCount, 'users');
+                        } else {
+                            console.warn('Session ID mismatch! Requested:', currentSessionId, 'Got:', data.sessionId);
+                            // Update to match server (shouldn't happen, but handle gracefully)
+                            currentSessionId = data.sessionId;
+                            sessionIdDisplay.textContent = currentSessionId;
+                            clientCountDisplay.textContent = `(${data.clientCount} user${data.clientCount !== 1 ? 's' : ''})`;
+                            sessionInfo.style.display = 'flex';
+                            setSessionIdInUrl(currentSessionId);
+                        }
                         // Reset remote drawing state when session info is received
                         resetRemoteDrawingState();
                         return;
@@ -298,7 +315,12 @@
             ws.onclose = () => {
                 statusIndicator.className = 'status-indicator';
                 statusText.textContent = 'Disconnected - Reconnecting...';
-                setTimeout(connect, 1000);
+                // Only auto-reconnect if we're not intentionally switching sessions
+                if (!isSwitchingSession) {
+                    setTimeout(connect, 1000);
+                } else {
+                    console.log('Session switch in progress, not auto-reconnecting');
+                }
             };
 
             ws.onerror = (error) => {
@@ -321,7 +343,7 @@
         }
         
         function handleRemoteDrawing(data) {
-            console.log('Received drawing data:', data); // Debug
+            console.log('Received drawing data:', data, 'remotePathActive:', remotePathActive, 'lastPos:', lastRemoteX, lastRemoteY); // Debug
             if (data[0] === 'd') { // 'd' = draw
                 if (data[3]) { // start flag - new stroke
                     // End any existing path first
@@ -336,19 +358,19 @@
                     lastRemoteX = data[4];
                     lastRemoteY = data[5];
                     remotePathActive = true;
+                    console.log('Started new path at:', data[4], data[5]);
                 } else {
                     // Continue existing path
                     if (!remotePathActive) {
-                        // If we missed the start, begin a new path at last known position
-                        // Use current coordinates if last position is invalid
-                        const startX = (lastRemoteX === 0 && lastRemoteY === 0) ? data[4] : lastRemoteX;
-                        const startY = (lastRemoteX === 0 && lastRemoteY === 0) ? data[5] : lastRemoteY;
+                        // If we missed the start, begin a new path at current coordinates
+                        // This should only happen if we join mid-drawing
+                        console.warn('Missed start message, starting path at:', data[4], data[5]);
                         ctx.beginPath();
                         ctx.strokeStyle = data[1];
                         ctx.lineWidth = data[2];
-                        ctx.moveTo(startX, startY);
-                        lastRemoteX = startX;
-                        lastRemoteY = startY;
+                        ctx.moveTo(data[4], data[5]);
+                        lastRemoteX = data[4];
+                        lastRemoteY = data[5];
                         remotePathActive = true;
                     }
                     // Update style if changed (but don't restart path)
@@ -359,6 +381,7 @@
                         ctx.strokeStyle = data[1];
                         ctx.lineWidth = data[2];
                         ctx.moveTo(lastRemoteX, lastRemoteY);
+                        console.log('Style changed, restarted path at:', lastRemoteX, lastRemoteY);
                     }
                     // Continue the line - add to path from last point
                     // Validate coordinates are reasonable (within canvas bounds)
@@ -367,8 +390,22 @@
                     const x = Math.max(0, Math.min(data[4], displayWidth));
                     const y = Math.max(0, Math.min(data[5], displayHeight));
                     
-                    // Continue from last point to new point
-                    ctx.lineTo(x, y);
+                    // Check if coordinates jumped (might indicate a new stroke)
+                    const dx = Math.abs(x - lastRemoteX);
+                    const dy = Math.abs(y - lastRemoteY);
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // If coordinates jumped too far (more than 100px), it's likely a new stroke
+                    if (distance > 100 && remotePathActive) {
+                        console.warn('Large coordinate jump detected:', distance, 'from', lastRemoteX, lastRemoteY, 'to', x, y);
+                        // End current path and start new one
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.moveTo(x, y);
+                    } else {
+                        // Continue from last point to new point
+                        ctx.lineTo(x, y);
+                    }
                     // Stroke immediately for real-time feedback
                     ctx.stroke();
                     lastRemoteX = x;
@@ -401,6 +438,9 @@
         }
 
         // Drawing functions
+        let lastSentX = null;
+        let lastSentY = null;
+        
         function startDrawing(e) {
             isDrawing = true;
             const rect = canvas.getBoundingClientRect();
@@ -409,6 +449,10 @@
             
             ctx.beginPath();
             ctx.moveTo(x, y);
+            
+            // Reset last sent coordinates
+            lastSentX = x;
+            lastSentY = y;
             
             // Compact format: ['d', color, lineWidth, start, x, y]
             sendDrawing(['d', currentColor, lineWidth, true, x, y]);
@@ -422,16 +466,28 @@
             const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
             const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
             
+            // Skip if coordinates haven't changed (prevents duplicate messages)
+            if (lastSentX === x && lastSentY === y) {
+                return;
+            }
+            
             ctx.lineTo(x, y);
             ctx.stroke();
+            
+            // Update last sent coordinates
+            lastSentX = x;
+            lastSentY = y;
             
             // Compact format: ['d', color, lineWidth, start, x, y]
             sendDrawing(['d', currentColor, lineWidth, false, x, y]);
         }
-
+        
         function stopDrawing() {
             if (isDrawing) {
                 isDrawing = false;
+                // Reset last sent coordinates when stopping
+                lastSentX = null;
+                lastSentY = null;
             }
         }
 
@@ -472,6 +528,7 @@
         newSessionBtn.addEventListener('click', () => {
             // Generate a random session ID
             const newSessionId = Math.random().toString(36).substring(2, 9);
+            console.log('Creating new session:', newSessionId);
             currentSessionId = newSessionId;
             setSessionIdInUrl(newSessionId);
             
@@ -479,29 +536,43 @@
             isDrawing = false;
             resetRemoteDrawingState();
             
+            // Set flag to prevent auto-reconnect to old session
+            isSwitchingSession = true;
+            
             // Close current connection and reconnect with new session
             if (ws) {
                 ws.close();
             }
-            setTimeout(() => connect(), 100);
+            setTimeout(() => {
+                isSwitchingSession = false; // Reset before connecting
+                connect();
+            }, 100);
         });
 
         // Join session button
         joinSessionBtn.addEventListener('click', () => {
             const sessionId = prompt('Enter session ID to join:');
             if (sessionId && sessionId.trim()) {
-                currentSessionId = sessionId.trim();
+                const newSessionId = sessionId.trim();
+                console.log('Joining session:', newSessionId);
+                currentSessionId = newSessionId;
                 setSessionIdInUrl(currentSessionId);
                 
                 // Reset local drawing state
                 isDrawing = false;
                 resetRemoteDrawingState();
                 
+                // Set flag to prevent auto-reconnect to old session
+                isSwitchingSession = true;
+                
                 // Close current connection and reconnect with new session
                 if (ws) {
                     ws.close();
                 }
-                setTimeout(() => connect(), 100);
+                setTimeout(() => {
+                    isSwitchingSession = false; // Reset before connecting
+                    connect();
+                }, 100);
             }
         });
 
